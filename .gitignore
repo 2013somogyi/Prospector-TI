@@ -1,0 +1,11 @@
+env.js
+.env
+.env.*
+!.env.example
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+node_modules/
