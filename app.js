@@ -1,6 +1,6 @@
 /* ================= CONFIGURAÇÃO ================= */
 const CONFIG = {
-  GEMINI_API_KEY: "AQ.Ab8RN6JfguNmPngndvuL0tKHV1bMSH-SX_WbEQtPsLc_PNy-Vw",
+  GEMINI_API_KEY: "",
   GEMINI_API_ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
   OVERPASS_MIRRORS: [
     "https://overpass-api.de/api/interpreter",
