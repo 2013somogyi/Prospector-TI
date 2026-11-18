@@ -1,5 +1,4 @@
 /* ================= CONFIGURAÇÃO ================= */
-// Chave e endpoint vêm do arquivo env.js (que fica fora do Git). Não coloque a chave aqui.
 const ENV = window.ENV || {};
 const CONFIG = {
   GEMINI_API_KEY: ENV.GEMINI_API_KEY || "",
@@ -11,7 +10,7 @@ const CONFIG = {
   ],
   NOMINATIM_ENDPOINT: "https://nominatim.openstreetmap.org/search",
   CACHE_EXPIRATION_DAYS: 7,
-  REQUEST_DELAY_MS: 2000 // intervalo entre requisições (evita erro 429)
+  REQUEST_DELAY_MS: 2000 // intervalo entre requisições
 };
 
 /* ================= UTILIDADES ================= */
