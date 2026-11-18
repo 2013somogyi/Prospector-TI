@@ -3,48 +3,55 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prospector TI — Leads</title>
+<title>Prospector TI — Leads B2B</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <h1>Prospector TI</h1>
-  <div class="top-actions">
-    <button id="btnConfig" class="ghost">Configurar API</button>
-    <button id="btnTheme" class="ghost" aria-label="Alternar tema">Tema</button>
+<header class="hero">
+  <div class="hero-inner">
+    <nav class="nav">
+      <span class="brand"><i class="dot"></i>Prospector TI</span>
+      <button id="btnTheme" class="chip" aria-label="Alternar tema">Modo claro</button>
+    </nav>
+    <h1>Encontre quem decide em TI nas empresas ao seu redor</h1>
+    <p class="sub">Informe um CEP ou endereço, escolha o segmento e receba gestores, contatos e abordagens prontas.</p>
+
+    <section class="search" id="controls">
+      <div class="search-main">
+        <label class="grow">CEP ou endereço
+          <input id="address" type="text" autocomplete="street-address" placeholder="01310-100  ou  Av. Paulista, 1000 - São Paulo, SP">
+        </label>
+        <button id="btnStart" class="primary">Iniciar varredura</button>
+      </div>
+      <div class="search-opts">
+        <label>Raio
+          <select id="radius">
+            <option value="1">1 km</option><option value="2">2 km</option>
+            <option value="5" selected>5 km</option><option value="10">10 km</option><option value="15">15 km</option>
+          </select>
+        </label>
+        <label class="grow">Segmento
+          <select id="segment">
+            <option value="all">Todos os estabelecimentos corporativos</option>
+            <option value="office">Escritórios e corporativo</option>
+            <option value="industrial">Indústrias e fábricas</option>
+            <option value="logistics">Logística e galpões</option>
+            <option value="health">Hospitais e clínicas</option>
+            <option value="retail">Varejo de grande porte</option>
+            <option value="education">Instituições de ensino</option>
+          </select>
+        </label>
+        <label>Limite de empresas
+          <input id="limit" type="number" min="1" max="50" value="10">
+        </label>
+      </div>
+      <p id="resolved" class="resolved" aria-live="polite"></p>
+    </section>
   </div>
 </header>
 
 <main>
-  <section class="panel" id="controls">
-    <label class="wide">Endereço base
-      <input id="address" type="text" placeholder="Av. Paulista, 1000 - São Paulo, SP">
-    </label>
-    <label>Raio
-      <select id="radius">
-        <option value="1">1 km</option><option value="2">2 km</option>
-        <option value="5" selected>5 km</option><option value="10">10 km</option><option value="15">15 km</option>
-      </select>
-    </label>
-    <label>Segmento
-      <select id="segment">
-        <option value="all">Todos os estabelecimentos corporativos</option>
-        <option value="office">Escritórios e corporativo</option>
-        <option value="industrial">Indústrias e fábricas</option>
-        <option value="logistics">Logística e galpões</option>
-        <option value="health">Hospitais e clínicas</option>
-        <option value="retail">Varejo de grande porte</option>
-        <option value="education">Instituições de ensino</option>
-      </select>
-    </label>
-    <label>Limite de empresas
-      <input id="limit" type="number" min="1" max="50" value="10">
-    </label>
-    <label class="check"><input id="noCache" type="checkbox"> Ignorar cache (forçar nova consulta)</label>
-    <button id="btnStart" class="primary">Iniciar varredura</button>
-  </section>
-
-  <section id="progressBox" class="panel" hidden>
+  <section id="progressBox" class="card progress" hidden>
     <div class="bar"><div id="barFill"></div></div>
     <p id="status" aria-live="polite"></p>
     <div class="row">
@@ -60,31 +67,21 @@
     <div><b id="kCache">0</b><span>Consultas poupadas (cache)</span></div>
   </section>
 
-  <section class="panel">
-    <div class="row between">
+  <section class="card">
+    <div class="toolbar">
       <input id="filter" type="search" placeholder="Filtrar por empresa, gestor ou confiança">
-      <div class="row">
-        <button id="btnCsv" class="ghost">Exportar CSV (Excel)</button>
-        <button id="btnJson" class="ghost">Exportar JSON</button>
-      </div>
+      <button id="btnCsv" class="ghost">Exportar CSV (Excel)</button>
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Empresa e local</th><th>Gestor e cargo</th><th>Contatos</th><th>Confiança</th><th>Ações</th></tr></thead>
-        <tbody id="rows"><tr><td colspan="5" class="empty">Informe um endereço e inicie a varredura para listar empresas.</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="5" class="empty">Informe um CEP ou endereço e inicie a varredura para listar empresas.</td></tr></tbody>
       </table>
     </div>
   </section>
 </main>
 
 <footer>Use dados públicos corporativos de forma ética e em conformidade com a LGPD (Art. 7º, IX — legítimo interesse em prospecção B2B). Ofereça sempre a opção de descadastro.</footer>
-
-<dialog id="dlgConfig">
-  <h2>Configurações da API</h2>
-  <label>Chave da API (Gemini)<input id="cfgKey" type="password" autocomplete="off"></label>
-  <label>Endpoint do Gemini<input id="cfgEndpoint" type="text"></label>
-  <div class="row"><button id="cfgSave" class="primary">Salvar</button><button id="cfgClose" class="ghost">Fechar</button></div>
-</dialog>
 
 <dialog id="dlgScript">
   <h2>Mensagem de abordagem</h2>
