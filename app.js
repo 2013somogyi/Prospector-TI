@@ -1,7 +1,7 @@
 /* ================= CONFIGURAÇÃO ================= */
 const CONFIG = {
-  GEMINI_API_KEY: "COLE_SUA_CHAVE_AQUI",
-  GEMINI_API_ENDPOINT: "COLE_SEU_ENDPOINT_AQUI", // ex: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+  GEMINI_API_KEY: "AQ.Ab8RN6JfguNmPngndvuL0tKHV1bMSH-SX_WbEQtPsLc_PNy-Vw",
+  GEMINI_API_ENDPOINT: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
   OVERPASS_MIRRORS: [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -9,7 +9,7 @@ const CONFIG = {
   ],
   NOMINATIM_ENDPOINT: "https://nominatim.openstreetmap.org/search",
   CACHE_EXPIRATION_DAYS: 7,
-  REQUEST_DELAY_MS: 2000 // intervalo entre requisições (evita erro 429)
+  REQUEST_DELAY_MS: 10000 // intervalo entre requisições (evita erro 429)
 };
 
 /* ================= UTILIDADES ================= */
