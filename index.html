@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prospector TI — Leads B2B geolocalizados</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>Prospector TI</h1>
+  <div class="top-actions">
+    <button id="btnConfig" class="ghost">Configurar API</button>
+    <button id="btnTheme" class="ghost" aria-label="Alternar tema">Tema</button>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="controls">
+    <label class="wide">Endereço base
+      <input id="address" type="text" placeholder="Av. Paulista, 1000 - São Paulo, SP">
+    </label>
+    <label>Raio
+      <select id="radius">
+        <option value="1">1 km</option><option value="2">2 km</option>
+        <option value="5" selected>5 km</option><option value="10">10 km</option><option value="15">15 km</option>
+      </select>
+    </label>
+    <label>Segmento
+      <select id="segment">
+        <option value="all">Todos os estabelecimentos corporativos</option>
+        <option value="office">Escritórios e corporativo</option>
+        <option value="industrial">Indústrias e fábricas</option>
+        <option value="logistics">Logística e galpões</option>
+        <option value="health">Hospitais e clínicas</option>
+        <option value="retail">Varejo de grande porte</option>
+        <option value="education">Instituições de ensino</option>
+      </select>
+    </label>
+    <label>Limite de empresas
+      <input id="limit" type="number" min="1" max="50" value="10">
+    </label>
+    <label class="check"><input id="noCache" type="checkbox"> Ignorar cache (forçar nova consulta)</label>
+    <button id="btnStart" class="primary">Iniciar varredura</button>
+  </section>
+
+  <section id="progressBox" class="panel" hidden>
+    <div class="bar"><div id="barFill"></div></div>
+    <p id="status" aria-live="polite"></p>
+    <div class="row">
+      <button id="btnPause" class="ghost">Pausar</button>
+      <button id="btnCancel" class="danger">Cancelar varredura</button>
+    </div>
+  </section>
+
+  <section id="kpis" class="kpis">
+    <div><b id="kTotal">0</b><span>Empresas encontradas</span></div>
+    <div><b id="kMgr">0</b><span>Gestores identificados</span></div>
+    <div><b id="kContact">0</b><span>Contatos diretos</span></div>
+    <div><b id="kCache">0</b><span>Consultas poupadas (cache)</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="row between">
+      <input id="filter" type="search" placeholder="Filtrar por empresa, gestor ou confiança">
+      <div class="row">
+        <button id="btnCsv" class="ghost">Exportar CSV (Excel)</button>
+        <button id="btnJson" class="ghost">Exportar JSON</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Empresa e local</th><th>Gestor e cargo</th><th>Contatos</th><th>Confiança</th><th>Ações</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="5" class="empty">Informe um endereço e inicie a varredura para listar empresas.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>Use dados públicos corporativos de forma ética e em conformidade com a LGPD (Art. 7º, IX — legítimo interesse em prospecção B2B). Ofereça sempre a opção de descadastro.</footer>
+
+<dialog id="dlgConfig">
+  <h2>Configurações da API</h2>
+  <label>Chave da API (Gemini)<input id="cfgKey" type="password" autocomplete="off"></label>
+  <label>Endpoint do Gemini<input id="cfgEndpoint" type="text"></label>
+  <div class="row"><button id="cfgSave" class="primary">Salvar</button><button id="cfgClose" class="ghost">Fechar</button></div>
+</dialog>
+
+<dialog id="dlgScript">
+  <h2>Mensagem de abordagem</h2>
+  <textarea id="scriptText" rows="9"></textarea>
+  <div class="row"><button id="scriptCopy" class="primary">Copiar texto</button><button id="scriptClose" class="ghost">Fechar</button></div>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>
