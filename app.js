@@ -1,4 +1,5 @@
 /* ================= CONFIGURAÇÃO ================= */
+// Chave e endpoint vêm do arquivo env.js (que fica fora do Git). Não coloque a chave aqui.
 const ENV = window.ENV || {};
 const CONFIG = {
   GEMINI_API_KEY: ENV.GEMINI_API_KEY || "",
@@ -33,19 +34,13 @@ let results = [];
 let stats = { cacheHits: 0 };
 let paused = false, abortCtrl = null, running = false;
 
-/* ================= TEMA E CONFIG UI ================= */
-function applyTheme(t) { document.documentElement.dataset.theme = t; store.set("theme", t); }
-applyTheme(store.get("theme", matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
+/* ================= TEMA ================= */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t; store.set("theme", t);
+  $("btnTheme").textContent = t === "dark" ? "Modo claro" : "Modo escuro";
+}
+applyTheme(store.get("theme", "dark"));
 $("btnTheme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
-
-function getKey() { return store.get("apiKey", CONFIG.GEMINI_API_KEY); }
-function getEndpoint() { return store.get("apiEndpoint", CONFIG.GEMINI_API_ENDPOINT); }
-$("btnConfig").onclick = () => { $("cfgKey").value = getKey(); $("cfgEndpoint").value = getEndpoint(); $("dlgConfig").showModal(); };
-$("cfgClose").onclick = () => $("dlgConfig").close();
-$("cfgSave").onclick = () => {
-  store.set("apiKey", $("cfgKey").value.trim()); store.set("apiEndpoint", $("cfgEndpoint").value.trim());
-  $("dlgConfig").close(); toast("Configurações salvas.", "ok");
-};
 
 /* ================= FETCH / ESPERA ================= */
 function sleep(ms, signal) {
@@ -56,15 +51,79 @@ function sleep(ms, signal) {
 }
 async function waitIfPaused(signal) { while (paused) await sleep(300, signal); }
 
-/* ================= GEOCODING ================= */
-async function geocode(address, signal) {
-  const url = `${CONFIG.NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=1&q=${encodeURIComponent(address)}`;
-  const r = await fetch(url, { headers: { "Accept-Language": "pt-BR" }, signal });
-  if (!r.ok) throw new Error("Falha no geocoding (HTTP " + r.status + ")");
-  const d = await r.json();
-  if (!d.length) throw new Error("Endereço não encontrado. Tente incluir cidade e estado.");
-  const a = d[0].address || {};
-  return { lat: +d[0].lat, lon: +d[0].lon, city: a.city || a.town || a.municipality || a.village || a.county || "" };
+/* ================= ENDEREÇO: VIACEP + NOMINATIM ================= */
+const UFS = new Set("AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO".split(" "));
+const ABBR = { av: "Avenida", r: "Rua", al: "Alameda", tv: "Travessa", rod: "Rodovia", pca: "Praça", estr: "Estrada", lgo: "Largo" };
+const joinParts = a => a.filter(Boolean).join(", ");
+const cleanStreet = s => s.replace(/^\s*([A-Za-zÀ-ú]+)\.?\s+/, (m, a) => ABBR[norm(a)] ? ABBR[norm(a)] + " " : m).replace(/\s+/g, " ").trim();
+
+// Extrai rua, número, cidade e UF de textos como "Av. Paulista, 1000 - São Paulo, SP"
+function parseAddress(raw) {
+  let t = raw.replace(/\s+/g, " ").trim(), uf = "";
+  const m = t.match(/[\s,\-–\/]([A-Za-z]{2})\s*$/);
+  if (m && UFS.has(m[1].toUpperCase())) { uf = m[1].toUpperCase(); t = t.slice(0, m.index).trim(); }
+  const parts = t.split(/\s*[,\-–\/]\s*/).filter(Boolean);
+  let number = "", city = "";
+  for (const p of parts.slice(1)) {
+    if (!number && /^(n[º°o.]?\s*)?\d+[a-z]?$/i.test(p)) number = p.replace(/\D/g, "");
+    else city = p;
+  }
+  return { street: cleanStreet(parts[0] || ""), number, city, uf };
+}
+
+async function getJson(url, signal) {
+  const r = await fetch(url, { signal });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function viaCep(url, signal, pick) {
+  try { return pick(await getJson(url, signal)); }
+  catch (e) { if (e.name === "AbortError") throw e; return null; }
+}
+const viaCepByCep = (cep, signal) => viaCep(`https://viacep.com.br/ws/${cep}/json/`, signal, d => d.erro ? null : d);
+const viaCepByAddr = (p, signal) => viaCep(`https://viacep.com.br/ws/${p.uf}/${encodeURIComponent(p.city)}/${encodeURIComponent(p.street)}/json/`, signal, d => Array.isArray(d) && d.length ? d[0] : null);
+
+async function nominatim(q, signal) {
+  const r = await fetch(`${CONFIG.NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=1&countrycodes=br&q=${encodeURIComponent(q)}`, { headers: { "Accept-Language": "pt-BR" }, signal });
+  if (!r.ok) throw new Error("Falha na localização (HTTP " + r.status + ")");
+  return (await r.json())[0] || null;
+}
+
+// Aceita CEP ou endereço (com ou sem cidade/UF), padroniza via ViaCEP e geocodifica
+async function resolveAddress(input, signal) {
+  const raw = input.replace(/\s+/g, " ").trim();
+  const cepM = raw.match(/\b(\d{5})-?(\d{3})\b/);
+  let via = null, number = "";
+  if (cepM) {
+    via = await viaCepByCep(cepM[1] + cepM[2], signal);
+    if (!via) throw new Error("CEP não encontrado. Confira os números ou informe o endereço completo.");
+    number = (raw.replace(cepM[0], "").match(/\b\d{1,5}\b/) || [""])[0];
+  } else {
+    const p = parseAddress(raw); number = p.number;
+    if (p.uf && p.city && p.street.length >= 3) via = await viaCepByAddr(p, signal);
+  }
+  const tries = new Set();
+  if (via) {
+    if (via.logradouro) {
+      tries.add(joinParts([via.logradouro + (number ? ", " + number : ""), via.bairro, via.localidade, via.uf, "Brasil"]));
+      tries.add(joinParts([via.logradouro, via.bairro, via.localidade, via.uf, "Brasil"]));
+    }
+    tries.add(joinParts([via.bairro, via.localidade, via.uf, "Brasil"]));
+  } else tries.add(/brasil/i.test(raw) ? raw : raw + ", Brasil");
+  let i = 0;
+  for (const q of tries) {
+    if (i++) await sleep(1100, signal); // respeita o limite de 1 req/s do Nominatim
+    const g = await nominatim(q, signal);
+    if (g) {
+      const a = g.address || {};
+      return {
+        lat: +g.lat, lon: +g.lon,
+        city: via?.localidade || a.city || a.town || a.municipality || a.village || a.county || "",
+        label: via ? joinParts([via.logradouro, number, via.bairro, `${via.localidade}/${via.uf}`, via.cep && "CEP " + via.cep]) : g.display_name
+      };
+    }
+  }
+  throw new Error("Endereço não encontrado. Tente informar o CEP ou incluir cidade e UF.");
 }
 
 /* ================= OVERPASS ================= */
@@ -127,9 +186,9 @@ function parseJson(text) {
 }
 
 async function callGemini(body, signal) {
-  const key = getKey(), endpoint = getEndpoint();
-  if (!key || key.startsWith("COLE_")) throw new Error("Chave da API não configurada.");
-  if (!endpoint || endpoint.startsWith("COLE_")) throw new Error("Endpoint do Gemini não configurado.");
+  const key = CONFIG.GEMINI_API_KEY, endpoint = CONFIG.GEMINI_API_ENDPOINT;
+  if (!key || key.startsWith("COLE_")) throw new Error("Chave da API não configurada. Preencha o arquivo env.js.");
+  if (!endpoint || endpoint.startsWith("COLE_")) throw new Error("Endpoint do Gemini não configurado. Preencha o arquivo env.js.");
   const headers = { "Content-Type": "application/json" };
   let url = endpoint;
   if (/[?&]key=/.test(endpoint)) { /* chave já na URL */ }
@@ -153,12 +212,14 @@ async function enrich(c, city, signal) {
   return parseJson(text);
 }
 
-/* ================= CACHE ================= */
+/* ================= CACHE (decisão automática) ================= */
 const cacheKey = (c, city) => "lead:" + norm(c.empresa) + "|" + norm(city);
 function cacheGet(c, city) {
   const e = store.get(cacheKey(c, city), null);
-  if (!e || Date.now() - e.t > CONFIG.CACHE_EXPIRATION_DAYS * 864e5) return null;
-  return e.d;
+  if (!e) return null;
+  // Resultado com gestor identificado vale por N dias; resultado vazio expira em 1 dia para nova tentativa.
+  const days = isEmptyVal(e.d.gestor_nome) ? 1 : CONFIG.CACHE_EXPIRATION_DAYS;
+  return Date.now() - e.t > days * 864e5 ? null : e.d;
 }
 const cacheSet = (c, city, d) => store.set(cacheKey(c, city), { t: Date.now(), d });
 
@@ -168,8 +229,8 @@ function setProgress(i, total, msg) {
   $("status").textContent = msg;
 }
 
-async function processLead(lead, city, force, signal) {
-  const cached = !force && cacheGet(lead, city);
+async function processLead(lead, city, signal) {
+  const cached = cacheGet(lead, city);
   if (cached) { stats.cacheHits++; return { ...lead, ...cached, fromCache: true }; }
   const d = await enrich(lead, city, signal);
   cacheSet(lead, city, d);
@@ -181,13 +242,14 @@ async function startScan() {
   const address = $("address").value.trim();
   if (!address) return toast("Informe o endereço base.", "error");
   const limit = Math.min(50, Math.max(1, +$("limit").value || 10));
-  const force = $("noCache").checked;
   abortCtrl = new AbortController(); const signal = abortCtrl.signal;
   running = true; paused = false; results = []; stats.cacheHits = 0; render();
   $("progressBox").hidden = false; $("btnStart").disabled = true; $("btnPause").textContent = "Pausar";
   try {
-    setProgress(0, 1, "Localizando endereço...");
-    const geo = await geocode(address, signal);
+    setProgress(0, 1, "Validando endereço (ViaCEP)...");
+    $("resolved").textContent = "";
+    const geo = await resolveAddress(address, signal);
+    $("resolved").textContent = "Localizado: " + geo.label;
     setProgress(0, 1, "Buscando empresas no OpenStreetMap...");
     const radiusM = +$("radius").value * 1000;
     const found = dedupe(await overpass(buildQuery($("segment").value, radiusM, geo.lat, geo.lon), signal)).slice(0, limit);
@@ -198,7 +260,7 @@ async function startScan() {
       await waitIfPaused(signal);
       setProgress(i, found.length, `Processando ${i + 1} de ${found.length}: ${found[i].empresa}...`);
       try {
-        const res = await processLead(found[i], geo.city, force, signal);
+        const res = await processLead(found[i], geo.city, signal);
         results[i] = res; render();
         if (!res.fromCache && i < found.length - 1) {
           setProgress(i + 1, found.length, `Processando ${i + 1} de ${found.length}: ${found[i].empresa}... (aguardando intervalo de segurança)`);
@@ -292,7 +354,6 @@ function download(name, content, type) {
   a.href = URL.createObjectURL(new Blob([content], { type })); a.download = name; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
-$("btnJson").onclick = () => results.length ? download("leads.json", JSON.stringify(results, null, 2), "application/json") : toast("Nada para exportar.", "error");
 $("btnCsv").onclick = () => {
   if (!results.length) return toast("Nada para exportar.", "error");
   const cols = ["empresa", "endereco", "maps", "gestor_nome", "cargo", "linkedin", "email", "telefone", "nivel_confianca", "observacao", "website"];
@@ -301,3 +362,5 @@ $("btnCsv").onclick = () => {
   download("leads.csv", "\uFEFF" + csv, "text/csv;charset=utf-8");
 };
 render();
+$("address").addEventListener("keydown", e => { if (e.key === "Enter") startScan(); });
+if (!CONFIG.GEMINI_API_KEY || CONFIG.GEMINI_API_KEY.startsWith("COLE_")) toast("Chave da API ausente: preencha o arquivo env.js.", "error");
