@@ -3,6 +3,8 @@ const ENV = window.ENV || {};
 const CONFIG = {
   GEMINI_API_KEY: ENV.GEMINI_API_KEY || "",
   GEMINI_API_ENDPOINT: ENV.GEMINI_API_ENDPOINT,
+  GEOAPIFY_API_KEY: ENV.GEOAPIFY_API_KEY || "",
+  GEOAPIFY_ENDPOINT: "https://api.geoapify.com/v2/places",
   OVERPASS_MIRRORS: [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -166,9 +168,20 @@ const SEGMENTS = {
 };
 SEGMENTS.all = Object.values(SEGMENTS).flat();
 
-function buildQuery(seg, radiusM, lat, lon) {
+const GEOAPIFY_SEGMENTS = {
+  office: ["office"],
+  industrial: ["production", "power.plant"],
+  logistics: ["office.logistics", "rental.storage"],
+  health: ["healthcare.hospital", "healthcare.clinic_or_praxis"],
+  retail: ["commercial.supermarket", "commercial.department_store"],
+  education: ["education.university", "education.college"]
+};
+GEOAPIFY_SEGMENTS.all = [...new Set(Object.values(GEOAPIFY_SEGMENTS).flat())];
+
+function buildQuery(seg, radiusM, lat, lon, limit) {
   const parts = SEGMENTS[seg].map(f => `node${f}["name"](around:${radiusM},${lat},${lon});way${f}["name"](around:${radiusM},${lat},${lon});`).join("");
-  return `[out:json][timeout:10];(${parts});out center tags;`;
+  const resultLimit = Math.max(50, Math.min(500, limit * 10));
+  return `[out:json][timeout:10];(${parts});out center tags qt ${resultLimit};`;
 }
 
 async function overpass(query, signal, onAttempt = () => {}) {
@@ -207,6 +220,62 @@ function dedupe(elements) {
     });
   }
   return [...seen.values()];
+}
+
+function geoapifyElements(features) {
+  return features.map(feature => {
+    const properties = feature.properties || {};
+    const [lon, lat] = feature.geometry?.coordinates || [];
+    const raw = properties.datasource?.raw || {};
+    return {
+      lat: Number(properties.lat ?? lat),
+      lon: Number(properties.lon ?? lon),
+      tags: {
+        name: properties.name || "",
+        "addr:street": properties.street || properties.address_line1 || properties.formatted || "",
+        "addr:housenumber": properties.housenumber || "",
+        website: properties.website || properties.contact?.website || raw.website || raw["contact:website"] || "",
+        phone: properties.phone || properties.contact?.phone || raw.phone || raw["contact:phone"] || ""
+      }
+    };
+  }).filter(place => place.tags.name && Number.isFinite(place.lat) && Number.isFinite(place.lon));
+}
+
+async function geoapifyPlaces(segment, radiusM, lat, lon, limit, signal) {
+  if (!CONFIG.GEOAPIFY_API_KEY || CONFIG.GEOAPIFY_API_KEY.startsWith("COLE_")) throw new Error("Configure GEOAPIFY_API_KEY no env.js para usar Geoapify Places.");
+  const categories = GEOAPIFY_SEGMENTS[segment];
+  const r = await fetchWithTimeout(`${CONFIG.GEOAPIFY_ENDPOINT}?lang=pt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": CONFIG.GEOAPIFY_API_KEY },
+    body: JSON.stringify({
+      categories,
+      filter: { type: "circle", lon, lat, radius: radiusM },
+      bias: { type: "proximity", lon, lat },
+      limit: Math.min(500, Math.max(limit, limit * 3)),
+      lang: "pt"
+    }),
+    signal
+  });
+  if (r.status === 401 || r.status === 403) throw Object.assign(new Error("Chave Geoapify inválida ou sem permissão."), { fatal: true });
+  if (r.status === 429) throw Object.assign(new Error("Limite de cota da Geoapify excedido (429)."), { quota: true });
+  if (r.status === 400) throw new Error("Geoapify rejeitou as categorias ou o filtro geográfico (HTTP 400).");
+  if (!r.ok) throw new Error("Erro Geoapify HTTP " + r.status);
+  const data = await r.json();
+  if (!Array.isArray(data.features)) throw new Error("Resposta Geoapify fora do formato esperado.");
+  return dedupe(geoapifyElements(data.features)).slice(0, limit);
+}
+
+async function searchCompanies(segment, radiusM, geo, limit, signal, onProgress) {
+  if (CONFIG.GEOAPIFY_API_KEY && !CONFIG.GEOAPIFY_API_KEY.startsWith("COLE_")) {
+    onProgress("Buscando empresas no Geoapify Places...");
+    return geoapifyPlaces(segment, radiusM, geo.lat, geo.lon, limit, signal);
+  }
+  if (location.protocol === "file:") {
+    throw new Error("A página está aberta por file:// e o navegador não envia uma origem identificável ao Overpass. Sirva o site por HTTP/HTTPS ou configure GEOAPIFY_API_KEY em env.js.");
+  }
+  const query = buildQuery(segment, radiusM, geo.lat, geo.lon, limit);
+  const elements = await overpass(query, signal, (attempt, total) => onProgress(`Buscando empresas no OpenStreetMap (espelho ${attempt}/${total})...`));
+  return dedupe(elements).slice(0, limit);
 }
 
 /* ================= GEMINI ================= */
@@ -310,11 +379,8 @@ async function startScan() {
     $("resolved").textContent = "";
     const geo = await resolveAddress(address, signal);
     $("resolved").textContent = "Localizado: " + geo.label;
-    setProgress(0, 1, "Buscando empresas no OpenStreetMap...");
     const radiusM = +$("radius").value * 1000;
-    const query = buildQuery($("segment").value, radiusM, geo.lat, geo.lon);
-    const elements = await overpass(query, signal, (attempt, total) => setProgress(0, 1, `Buscando empresas no OpenStreetMap (espelho ${attempt}/${total})...`));
-    const found = dedupe(elements).slice(0, limit);
+    const found = await searchCompanies($("segment").value, radiusM, geo, limit, signal, message => setProgress(0, 1, message));
     if (!found.length) throw new Error("Nenhuma empresa com nome encontrada nesse raio/segmento.");
     window._city = geo.city;
     results = found.map(f => ({ ...f, pending: true })); render();
