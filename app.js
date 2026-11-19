@@ -10,7 +10,11 @@ const CONFIG = {
   ],
   NOMINATIM_ENDPOINT: "https://nominatim.openstreetmap.org/search",
   CACHE_EXPIRATION_DAYS: 7,
-  REQUEST_DELAY_MS: 2000 // intervalo entre requisições
+  HTTP_TIMEOUT_MS: 15000,
+  OVERPASS_TIMEOUT_MS: 10000,
+  OVERPASS_TOTAL_TIMEOUT_MS: 20000,
+  GEMINI_TIMEOUT_MS: 60000,
+  REQUEST_DELAY_MS: 750
 };
 
 /* ================= UTILIDADES ================= */
@@ -21,7 +25,10 @@ const store = {
 };
 const norm = s => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const isEmptyVal = v => !String(v ?? "").trim() || /^(não|nao) (identificado|encontrado)/i.test(String(v).trim());
+const isEmptyVal = v => {
+  const value = String(v ?? "").trim();
+  return !value || /^(?:(?:não|nao) (?:identificado|encontrado)|not (?:identified|found))\b/i.test(value);
+};
 
 function toast(msg, type = "") {
   const t = document.createElement("div");
@@ -42,6 +49,26 @@ applyTheme(store.get("theme", "dark"));
 $("btnTheme").onclick = () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
 
 /* ================= FETCH / ESPERA ================= */
+async function fetchWithTimeout(url, options = {}, timeoutMs = CONFIG.HTTP_TIMEOUT_MS) {
+  const signal = options.signal;
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    if (timedOut) throw new Error(`Tempo limite excedido (${Math.ceil(timeoutMs / 1000)} s).`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
 function sleep(ms, signal) {
   return new Promise((res, rej) => {
     const t = setTimeout(res, ms);
@@ -71,19 +98,22 @@ function parseAddress(raw) {
 }
 
 async function getJson(url, signal) {
-  const r = await fetch(url, { signal });
+  const r = await fetchWithTimeout(url, { signal });
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
 async function viaCep(url, signal, pick) {
   try { return pick(await getJson(url, signal)); }
-  catch (e) { if (e.name === "AbortError") throw e; return null; }
+  catch (e) {
+    if (e.name === "AbortError") throw e;
+    throw new Error("Falha na consulta ao ViaCEP: " + e.message);
+  }
 }
 const viaCepByCep = (cep, signal) => viaCep(`https://viacep.com.br/ws/${cep}/json/`, signal, d => d.erro ? null : d);
 const viaCepByAddr = (p, signal) => viaCep(`https://viacep.com.br/ws/${p.uf}/${encodeURIComponent(p.city)}/${encodeURIComponent(p.street)}/json/`, signal, d => Array.isArray(d) && d.length ? d[0] : null);
 
 async function nominatim(q, signal) {
-  const r = await fetch(`${CONFIG.NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=1&countrycodes=br&q=${encodeURIComponent(q)}`, { headers: { "Accept-Language": "pt-BR" }, signal });
+  const r = await fetchWithTimeout(`${CONFIG.NOMINATIM_ENDPOINT}?format=json&limit=1&addressdetails=1&countrycodes=br&q=${encodeURIComponent(q)}`, { headers: { "Accept-Language": "pt-BR" }, signal });
   if (!r.ok) throw new Error("Falha na localização (HTTP " + r.status + ")");
   return (await r.json())[0] || null;
 }
@@ -138,21 +168,27 @@ SEGMENTS.all = Object.values(SEGMENTS).flat();
 
 function buildQuery(seg, radiusM, lat, lon) {
   const parts = SEGMENTS[seg].map(f => `node${f}["name"](around:${radiusM},${lat},${lon});way${f}["name"](around:${radiusM},${lat},${lon});`).join("");
-  return `[out:json][timeout:25];(${parts});out center tags;`;
+  return `[out:json][timeout:10];(${parts});out center tags;`;
 }
 
-async function overpass(query, signal) {
+async function overpass(query, signal, onAttempt = () => {}) {
   let lastErr;
-  for (const mirror of CONFIG.OVERPASS_MIRRORS) {
+  const deadline = Date.now() + CONFIG.OVERPASS_TOTAL_TIMEOUT_MS;
+  for (let i = 0; i < CONFIG.OVERPASS_MIRRORS.length; i++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const mirror = CONFIG.OVERPASS_MIRRORS[i];
+    onAttempt(i + 1, CONFIG.OVERPASS_MIRRORS.length);
     try {
-      const r = await fetch(mirror, { method: "POST", body: "data=" + encodeURIComponent(query), headers: { "Content-Type": "application/x-www-form-urlencoded" }, signal });
+      const r = await fetchWithTimeout(mirror, { method: "POST", body: "data=" + encodeURIComponent(query), headers: { "Content-Type": "application/x-www-form-urlencoded" }, signal }, Math.min(CONFIG.OVERPASS_TIMEOUT_MS, remaining));
       if (!r.ok) throw new Error("HTTP " + r.status);
       return (await r.json()).elements || [];
     } catch (e) {
       if (e.name === "AbortError") throw e;
-      lastErr = e; toast("Servidor Overpass indisponível, tentando o próximo...");
+      lastErr = e;
     }
   }
+  if (Date.now() >= deadline) throw new Error(`Consulta ao Overpass excedeu ${Math.ceil(CONFIG.OVERPASS_TOTAL_TIMEOUT_MS / 1000)} s. Tente novamente.`);
   throw new Error("Todos os servidores Overpass falharam: " + (lastErr?.message || ""));
 }
 
@@ -174,8 +210,12 @@ function dedupe(elements) {
 }
 
 /* ================= GEMINI ================= */
-const SYSTEM_PROMPT = `Você é um analista de inteligência comercial B2B. Use a pesquisa na web para identificar o Gestor de TI, Gerente de TI, Coordenador de TI, Head de Tecnologia ou CTO da empresa indicada, na região informada. Nunca invente nomes: se não houver fonte confiável, use "Não identificado" / "Não encontrado". Responda ESTRITAMENTE com um objeto JSON válido, sem markdown, neste formato:
-{"empresa":"","gestor_nome":"","cargo":"","linkedin":"","email":"","telefone":"","nivel_confianca":"Alto | Médio | Baixo","observacao":""}`;
+const SYSTEM_PROMPT = `Atue como analista B2B. Use a busca na web para identificar o responsável atual por TI/tecnologia (Gerente ou Coordenador de TI, Head ou CTO) da empresa e região informadas.
+
+Confirme o vínculo em fontes públicas confiáveis (site oficial, LinkedIn ou imprensa) e não confunda homônimos. Nunca invente dados. Só inclua contatos publicados e associados à empresa ou pessoa. Sem fonte confiável, use "Não identificado" em gestor_nome e "Não encontrado" nos demais campos. Em observacao, resuma a evidência ou diga que não foi encontrada. Use Alto para confirmação atual em fonte confiável, Médio para evidência indireta ou antiga, e Baixo sem confirmação suficiente.
+
+Retorne somente JSON válido, sem Markdown ou texto adicional, com as chaves exatas abaixo. Escreva cargo, nivel_confianca e observacao em português:
+{"empresa":"","gestor_nome":"Não identificado","cargo":"Não encontrado","linkedin":"Não encontrado","email":"Não encontrado","telefone":"Não encontrado","nivel_confianca":"Baixo","observacao":""}`;
 
 function parseJson(text) {
   const clean = (text || "").replace(/```json|```/gi, "").trim();
@@ -192,19 +232,17 @@ async function callGemini(body, signal) {
   let url = endpoint;
   if (/[?&]key=/.test(endpoint)) { /* chave já na URL */ }
   else headers["x-goog-api-key"] = key;
-  return fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal });
+  return fetchWithTimeout(url, { method: "POST", headers, body: JSON.stringify(body), signal }, CONFIG.GEMINI_TIMEOUT_MS);
 }
 
 async function enrich(c, city, signal) {
   const ctx = [`Empresa: ${c.empresa}`, `Cidade/região: ${city || "não informada"}`, c.endereco && `Endereço OSM: ${c.endereco}`,
     c.website && `Site: ${c.website}`, c.telefoneOsm && `Telefone OSM: ${c.telefoneOsm}`, `Coordenadas: ${c.lat}, ${c.lon}`].filter(Boolean).join("\n");
   const base = { systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] }, contents: [{ role: "user", parts: [{ text: ctx }] }] };
-  let r = await callGemini({ ...base, tools: [{ google_search: {} }] }, signal);
-  if (r.status === 400) { // endpoint/modelo pode não aceitar google_search: fallback sem a ferramenta
-    r = await callGemini({ ...base, generationConfig: { responseMimeType: "application/json" } }, signal);
-  }
+  const r = await callGemini({ ...base, tools: [{ google_search: {} }] }, signal);
   if (r.status === 429) throw Object.assign(new Error("Limite de cota excedido (429)."), { quota: true });
   if (r.status === 401 || r.status === 403) throw Object.assign(new Error("Chave de API inválida ou sem permissão."), { fatal: true });
+  if (r.status === 400) throw new Error("Gemini rejeitou a busca na web (HTTP 400). Verifique se o modelo e o endpoint aceitam Google Search.");
   if (r.status === 404) throw new Error("Modelo Gemini não encontrado (HTTP 404). Atualize GEMINI_API_ENDPOINT para um modelo disponível.");
   if (!r.ok) throw new Error("Erro Gemini HTTP " + r.status);
   const data = await r.json();
@@ -216,22 +254,26 @@ async function enrich(c, city, signal) {
 function normalizeManagerData(data, lead) {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Resposta do Gemini fora do formato esperado.");
   const text = value => typeof value === "string" ? value.trim() : "";
+  const field = (value, fallback) => {
+    const result = text(value);
+    return !result || /^(?:(?:não|nao) (?:identificado|encontrado)|not (?:identified|found))$/i.test(result) ? fallback : result;
+  };
   const confidence = text(data.nivel_confianca);
   const confidenceKey = norm(confidence);
   return {
     empresa: lead.empresa,
-    gestor_nome: text(data.gestor_nome) || "Não identificado",
-    cargo: text(data.cargo),
-    linkedin: text(data.linkedin),
-    email: text(data.email),
-    telefone: text(data.telefone),
+    gestor_nome: field(data.gestor_nome, "Não identificado"),
+    cargo: field(data.cargo, "Não encontrado"),
+    linkedin: field(data.linkedin, "Não encontrado"),
+    email: field(data.email, "Não encontrado"),
+    telefone: field(data.telefone, "Não encontrado"),
     nivel_confianca: confidenceKey === "alto" ? "Alto" : confidenceKey === "medio" ? "Médio" : "Baixo",
     observacao: text(data.observacao)
   };
 }
 
 /* ================= CACHE (decisão automática) ================= */
-const cacheKey = (c, city) => "lead:" + norm(c.empresa) + "|" + norm(city);
+const cacheKey = (c, city) => "lead:v2:" + norm(c.empresa) + "|" + norm(city);
 function cacheGet(c, city) {
   const e = store.get(cacheKey(c, city), null);
   if (!e) return null;
@@ -270,7 +312,9 @@ async function startScan() {
     $("resolved").textContent = "Localizado: " + geo.label;
     setProgress(0, 1, "Buscando empresas no OpenStreetMap...");
     const radiusM = +$("radius").value * 1000;
-    const found = dedupe(await overpass(buildQuery($("segment").value, radiusM, geo.lat, geo.lon), signal)).slice(0, limit);
+    const query = buildQuery($("segment").value, radiusM, geo.lat, geo.lon);
+    const elements = await overpass(query, signal, (attempt, total) => setProgress(0, 1, `Buscando empresas no OpenStreetMap (espelho ${attempt}/${total})...`));
+    const found = dedupe(elements).slice(0, limit);
     if (!found.length) throw new Error("Nenhuma empresa com nome encontrada nesse raio/segmento.");
     window._city = geo.city;
     results = found.map(f => ({ ...f, pending: true })); render();
@@ -302,7 +346,7 @@ async function startScan() {
     }
   } catch (e) {
     if (e.name === "AbortError") { setProgress(0, 1, "Varredura cancelada."); toast("Varredura cancelada."); }
-    else toast(e.message, "error");
+    else { setProgress(0, 1, "Falha: " + e.message); toast(e.message, "error"); }
   } finally { running = false; $("btnStart").disabled = false; render(); }
 }
 $("btnStart").onclick = startScan;
