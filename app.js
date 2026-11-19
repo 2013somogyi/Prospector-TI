@@ -21,7 +21,7 @@ const store = {
 };
 const norm = s => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const isEmptyVal = v => !v || /^(não|nao) (identificado|encontrado)/i.test(v.trim());
+const isEmptyVal = v => !String(v ?? "").trim() || /^(não|nao) (identificado|encontrado)/i.test(String(v).trim());
 
 function toast(msg, type = "") {
   const t = document.createElement("div");
@@ -205,10 +205,29 @@ async function enrich(c, city, signal) {
   }
   if (r.status === 429) throw Object.assign(new Error("Limite de cota excedido (429)."), { quota: true });
   if (r.status === 401 || r.status === 403) throw Object.assign(new Error("Chave de API inválida ou sem permissão."), { fatal: true });
+  if (r.status === 404) throw new Error("Modelo Gemini não encontrado (HTTP 404). Atualize GEMINI_API_ENDPOINT para um modelo disponível.");
   if (!r.ok) throw new Error("Erro Gemini HTTP " + r.status);
   const data = await r.json();
   const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
-  return parseJson(text);
+  if (!text.trim()) throw new Error("Gemini retornou uma resposta vazia.");
+  return normalizeManagerData(parseJson(text), c);
+}
+
+function normalizeManagerData(data, lead) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Resposta do Gemini fora do formato esperado.");
+  const text = value => typeof value === "string" ? value.trim() : "";
+  const confidence = text(data.nivel_confianca);
+  const confidenceKey = norm(confidence);
+  return {
+    empresa: lead.empresa,
+    gestor_nome: text(data.gestor_nome) || "Não identificado",
+    cargo: text(data.cargo),
+    linkedin: text(data.linkedin),
+    email: text(data.email),
+    telefone: text(data.telefone),
+    nivel_confianca: confidenceKey === "alto" ? "Alto" : confidenceKey === "medio" ? "Médio" : "Baixo",
+    observacao: text(data.observacao)
+  };
 }
 
 /* ================= CACHE (decisão automática) ================= */
@@ -255,25 +274,32 @@ async function startScan() {
     if (!found.length) throw new Error("Nenhuma empresa com nome encontrada nesse raio/segmento.");
     window._city = geo.city;
     results = found.map(f => ({ ...f, pending: true })); render();
+    let completed = 0, interruption = "";
     for (let i = 0; i < found.length; i++) {
       await waitIfPaused(signal);
       setProgress(i, found.length, `Processando ${i + 1} de ${found.length}: ${found[i].empresa}...`);
       try {
         const res = await processLead(found[i], geo.city, signal);
-        results[i] = res; render();
+        results[i] = res; completed = i + 1; render();
         if (!res.fromCache && i < found.length - 1) {
           setProgress(i + 1, found.length, `Processando ${i + 1} de ${found.length}: ${found[i].empresa}... (aguardando intervalo de segurança)`);
           await sleep(CONFIG.REQUEST_DELAY_MS, signal);
         }
       } catch (e) {
         if (e.name === "AbortError") throw e;
-        results[i] = { ...found[i], error: e.message }; render();
+        results[i] = { ...found[i], error: e.message }; completed = i + 1; render();
         toast(e.message, "error");
-        if (e.fatal || e.quota) break;
+        if (e.fatal || e.quota) {
+          interruption = e.quota ? "cota do Gemini esgotada." : "falha de autenticação no Gemini.";
+          break;
+        }
       }
     }
-    setProgress(found.length, found.length, "Varredura concluída.");
-    toast("Varredura concluída.", "ok");
+    if (interruption) setProgress(completed, found.length, `Varredura interrompida: ${interruption}`);
+    else {
+      setProgress(found.length, found.length, "Varredura concluída.");
+      toast("Varredura concluída.", "ok");
+    }
   } catch (e) {
     if (e.name === "AbortError") { setProgress(0, 1, "Varredura cancelada."); toast("Varredura cancelada."); }
     else toast(e.message, "error");
