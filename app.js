@@ -18,7 +18,9 @@ const CONFIG = {
   CACHE_EXPIRATION_DAYS: 7,
   GEO_CACHE_DAYS: 30,
   HTTP_TIMEOUT_MS: 15000,
-  OVERPASS_TIMEOUT_MS: 20000,
+  OVERPASS_TIMEOUT_MS: 30000,
+  OVERPASS_HEDGE_MS: 2500,      // espelho seguinte só começa se o anterior demorar mais que isso
+  OVERPASS_CACHE_HOURS: 24,
   GEMINI_TIMEOUT_MS: 45000,
   GEMINI_RETRIES: 3,
   CONCURRENCY: Number(ENV.CONCURRENCY) || 3, // empresas processadas em paralelo
@@ -34,7 +36,7 @@ const store = {
     catch {
       // Cota do localStorage cheia: limpa caches antigos e tenta de novo.
       try {
-        Object.keys(localStorage).filter(x => x.startsWith("lead:") || x.startsWith("geo:")).forEach(x => localStorage.removeItem(x));
+        Object.keys(localStorage).filter(x => x.startsWith("lead:") || x.startsWith("geo:") || x.startsWith("op:")).forEach(x => localStorage.removeItem(x));
         localStorage.setItem(k, JSON.stringify(v));
       } catch {}
     }
@@ -194,9 +196,9 @@ const SEGMENTS = {
   office: ['["office"]'],
   industrial: ['["industrial"]', '["man_made"="works"]'],
   logistics: ['["building"="warehouse"]', '["landuse"="industrial"]'],
-  health: ['["amenity"="hospital"]', '["amenity"="clinic"]'],
-  retail: ['["shop"="supermarket"]', '["shop"="department_store"]'],
-  education: ['["amenity"="university"]', '["amenity"="college"]']
+  health: ['["amenity"~"^(hospital|clinic)$"]'],
+  retail: ['["shop"~"^(supermarket|department_store)$"]'],
+  education: ['["amenity"~"^(university|college)$"]']
 };
 SEGMENTS.all = Object.values(SEGMENTS).flat();
 
@@ -210,35 +212,38 @@ const GEOAPIFY_SEGMENTS = {
 };
 GEOAPIFY_SEGMENTS.all = [...new Set(Object.values(GEOAPIFY_SEGMENTS).flat())];
 
+// Usa bbox (muito mais barato que "around" no Overpass); o raio exato é aplicado depois, no navegador.
 function buildQuery(seg, radiusM, lat, lon, limit) {
-  // nwr = node + way + relation numa só cláusula (consulta menor e mais rápida)
-  const parts = SEGMENTS[seg].map(f => `nwr${f}["name"](around:${radiusM},${lat},${lon});`).join("");
+  const dLat = radiusM / 111320, dLon = radiusM / (111320 * Math.cos(lat * Math.PI / 180));
+  const bbox = [lat - dLat, lon - dLon, lat + dLat, lon + dLon].map(n => n.toFixed(5)).join(",");
+  const parts = SEGMENTS[seg].map(f => `nwr${f}["name"](${bbox});`).join("");
   const resultLimit = Math.max(50, Math.min(500, limit * 10));
-  return `[out:json][timeout:25];(${parts});out center tags qt ${resultLimit};`;
+  return `[out:json][timeout:25][maxsize:33554432];(${parts});out center tags qt ${resultLimit};`;
 }
 
-// Consulta todos os espelhos em paralelo e usa o primeiro que responder.
+// Requisições "escalonadas": o 1º espelho começa na hora; os outros só entram se ele demorar.
+// O primeiro que responder vence e os demais são cancelados.
 async function overpass(query, signal, onAttempt = () => {}) {
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   if (signal?.aborted) ctrl.abort(); else signal?.addEventListener("abort", onAbort, { once: true });
   onAttempt(CONFIG.OVERPASS_MIRRORS.length);
-  const tasks = CONFIG.OVERPASS_MIRRORS.map(async mirror => {
+  const tasks = CONFIG.OVERPASS_MIRRORS.map(async (mirror, i) => {
+    if (i) await sleep(i * CONFIG.OVERPASS_HEDGE_MS, ctrl.signal);
     const r = await fetchWithTimeout(mirror, {
       method: "POST", body: "data=" + encodeURIComponent(query),
       headers: { "Content-Type": "application/x-www-form-urlencoded" }, signal: ctrl.signal
     }, CONFIG.OVERPASS_TIMEOUT_MS);
-    if (!r.ok) throw new Error("HTTP " + r.status);
+    if (!r.ok) throw new Error(new URL(mirror).hostname + ": HTTP " + r.status);
     const json = await r.json();
-    if (json.remark && /error|timed out/i.test(json.remark) && !(json.elements || []).length) throw new Error(json.remark);
+    if (json.remark && /error|timed out|out of memory/i.test(json.remark) && !(json.elements || []).length) throw new Error(new URL(mirror).hostname + ": " + json.remark);
     return json.elements || [];
   });
   try {
     return await Promise.any(tasks);
   } catch (e) {
     if (signal?.aborted) throw new DOMException("Cancelado", "AbortError");
-    const msgs = (e.errors || [e]).map(x => x.message).join(" | ");
-    throw new Error("Todos os servidores Overpass falharam: " + msgs);
+    throw new Error("Todos os servidores Overpass falharam: " + (e.errors || [e]).map(x => x.message).join(" | "));
   } finally {
     ctrl.abort();
     signal?.removeEventListener("abort", onAbort);
@@ -320,12 +325,36 @@ async function searchCompanies(segment, radiusM, geo, limit, signal, onProgress)
   if (location.protocol === "file:") {
     throw new Error("A página está aberta por file:// e o navegador não envia uma origem identificável ao Overpass. Sirva o site por HTTP/HTTPS ou configure GEOAPIFY_API_KEY em env.js.");
   }
-  const query = buildQuery(segment, radiusM, geo.lat, geo.lon, limit);
-  const elements = await overpass(query, signal, total => onProgress(`Buscando empresas no OpenStreetMap (${total} servidores em paralelo)...`));
-  // Overpass não ordena por distância: prioriza as mais próximas do endereço base.
-  return dedupe(elements)
-    .sort((a, b) => distKm(geo.lat, geo.lon, a.lat, a.lon) - distKm(geo.lat, geo.lon, b.lat, b.lon))
-    .slice(0, limit);
+  // Busca em raios crescentes (2 km -> 5 km -> raio pedido): consultas pequenas respondem rápido
+  // e só ampliamos se faltarem empresas. Se um raio maior falhar, devolve o que já foi achado.
+  const radii = [...new Set([Math.min(radiusM, 2000), Math.min(radiusM, 5000), radiusM])].sort((a, b) => a - b);
+  let best = [], lastErr = null;
+  for (const r of radii) {
+    const ck = `op:v1:${segment}|${r}|${geo.lat.toFixed(3)},${geo.lon.toFixed(3)}|${limit}`;
+    const hit = store.get(ck, null);
+    let list;
+    if (hit && Date.now() - hit.t < CONFIG.OVERPASS_CACHE_HOURS * 36e5) list = hit.d;
+    else {
+      try {
+        onProgress(`Buscando empresas no OpenStreetMap (raio de ${r / 1000} km)...`);
+        const els = await overpass(buildQuery(segment, r, geo.lat, geo.lon, limit), signal, () => {});
+        list = dedupe(els)
+          .filter(p => distKm(geo.lat, geo.lon, p.lat, p.lon) <= r / 1000 + 0.05)
+          .sort((a, b) => distKm(geo.lat, geo.lon, a.lat, a.lon) - distKm(geo.lat, geo.lon, b.lat, b.lon));
+        store.set(ck, { t: Date.now(), d: list });
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        lastErr = e; break;
+      }
+    }
+    best = list;
+    if (list.length >= limit) break;
+  }
+  if (lastErr) {
+    if (!best.length) throw new Error(lastErr.message + " Dica: configure GEOAPIFY_API_KEY no env.js (plano gratuito) para não depender do Overpass.");
+    toast(`Raio maior falhou no Overpass; usando ${best.length} empresa(s) encontradas em raio menor.`);
+  }
+  return best.slice(0, limit);
 }
 
 /* ================= GEMINI ================= */
