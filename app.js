@@ -2,7 +2,7 @@
 const ENV = window.ENV || {};
 const CONFIG = {
   GEMINI_API_KEY: ENV.GEMINI_API_KEY || "",
-  GEMINI_API_ENDPOINT: ENV.GEMINI_API_ENDPOINT || "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+  GEMINI_API_ENDPOINT: ENV.GEMINI_API_ENDPOINT,
   OVERPASS_MIRRORS: [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
